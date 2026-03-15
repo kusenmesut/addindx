@@ -1,50 +1,106 @@
 from flask import Flask, render_template_string, request, redirect, flash, url_for
 from bs4 import BeautifulSoup
-import os
-import shutil
 from datetime import datetime
 from werkzeug.utils import secure_filename
 import copy
 import re
+from github import Github # EKLENDI: GitHub API kütüphanesi
+import os
+# Kodun içine yazmak yerine sunucu ortam değişkenlerinden çekeceğiz
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
+
 
 app = Flask(__name__, static_folder='.', static_url_path='')
 app.secret_key = "klassy_super_gizli_anahtar"
 
-# --- AYARLAR ---
-HTML_PATH = 'index.html'
-BACKUP_DIR = 'backups'
-IMG_DIR = 'assets/images' 
+# ==========================================
+# --- GITHUB VE PROJE AYARLARI ---
+# ==========================================
+GITHUB_REPO = "kusenmesut/vers" # Güncellenecek olan web sitesi deposu
+GITHUB_BRANCH = "main" # vers reposunun ana dalı (main veya master olabilir, kontrol et)
+HTML_PATH = 'public/index.html' # vers reposundaki html yolu
+IMG_DIR = 'public/assets/images' # vers reposundaki resim klasörü yolu
 
-os.makedirs(BACKUP_DIR, exist_ok=True)
-os.makedirs(IMG_DIR, exist_ok=True)
+
+# ==========================================
+
+# GitHub bağlantısını başlat
+g = Github(GITHUB_TOKEN)
+try:
+    repo = g.get_repo(GITHUB_REPO)
+except Exception as e:
+    print(f"HATA: GitHub reposuna bağlanılamadı. Token veya Repo adını kontrol edin. Detay: {e}")
+
 
 # --- YARDIMCI FONKSİYONLAR ---
+
 def backup_html():
-    if os.path.exists(HTML_PATH):
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_path = os.path.join(BACKUP_DIR, f'index_backup_{timestamp}.html')
-        shutil.copy2(HTML_PATH, backup_path)
+    # GitHub zaten versiyon kontrol sistemi (Git) olduğu için 
+    # her kayıt işlemi bir commit oluşturacaktır. 
+    # Bu yüzden yerel yedeklemeye gerek kalmadı.
+    pass 
 
 def get_soup():
-    with open(HTML_PATH, 'r', encoding='utf-8') as f:
-        html_str = f.read()
+    """GitHub'dan index.html dosyasını canlı çeker"""
+    try:
+        file_content = repo.get_contents(HTML_PATH, ref=GITHUB_BRANCH)
+        html_str = file_content.decoded_content.decode('utf-8')
+        
+        # Yol düzeltmeleri
         html_str = html_str.replace('../images/', 'assets/images/')
         html_str = html_str.replace('assets/images\\', 'assets/images/')
         return BeautifulSoup(html_str, 'html.parser')
+    except Exception as e:
+        print(f"HATA: Dosya çekilemedi. HTML_PATH doğru mu? Detay: {e}")
+        return BeautifulSoup("<html><body>Hata! HTML dosyası bulunamadı.</body></html>", 'html.parser')
 
 def save_soup(soup):
+    """Değişiklikleri GitHub'a Commit & Push yapar"""
     html_str = str(soup)
     html_str = html_str.replace('../images/', 'assets/images/')
     html_str = html_str.replace('assets/images\\', 'assets/images/')
-    with open(HTML_PATH, 'w', encoding='utf-8') as f:
-        f.write(html_str)
+    
+    try:
+        # Önce dosyanın mevcut SHA (hash) değerini almamız gerek
+        file_info = repo.get_contents(HTML_PATH, ref=GITHUB_BRANCH)
+        
+        # Güncelle ve commit at
+        commit_message = f"Admin panelden guncelleme: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        repo.update_file(
+            path=HTML_PATH, 
+            message=commit_message, 
+            content=html_str, 
+            sha=file_info.sha, 
+            branch=GITHUB_BRANCH
+        )
+    except Exception as e:
+        print(f"HATA: Dosya kaydedilemedi. Detay: {e}")
 
 def handle_upload(file_obj):
+    """Görselleri doğrudan GitHub reposuna yükler"""
     if file_obj and file_obj.filename:
-        filename = secure_filename(file_obj.filename)
-        filepath = os.path.join(IMG_DIR, filename)
-        file_obj.save(filepath)
-        return filepath.replace('\\', '/')
+        original_filename = secure_filename(file_obj.filename)
+        # Aynı isimde dosya çakışmasını önlemek için timestamp ekliyoruz
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        filename = f"{timestamp}_{original_filename}"
+        
+        github_path = f"{IMG_DIR}/{filename}"
+        
+        try:
+            content = file_obj.read()
+            commit_message = f"Panelden yeni gorsel eklendi: {filename}"
+            # Dosyayı GitHub'a oluştur (upload)
+            repo.create_file(
+                path=github_path, 
+                message=commit_message, 
+                content=content, 
+                branch=GITHUB_BRANCH
+            )
+            # HTML içine yazılacak göreceli yolu döndür
+            return f"assets/images/{filename}"
+        except Exception as e:
+            print(f"Resim yüklenirken hata: {e}")
+            return None
     return None
 
 INLINE_TAGS = ['a', 'span', 'strong', 'b', 'i', 'em', 'br', 'img', 'small', 'sub', 'sup', 'mark']
@@ -105,7 +161,7 @@ ADMIN_TEMPLATE = """
 <html lang="tr">
 <head>
     <meta charset="UTF-8">
-    <title>Gelişmiş CMS</title>
+    <title>Gelişmiş Headless CMS</title>
     <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
     <style>
         body { background-color: #f8f9fa; }
@@ -114,13 +170,15 @@ ADMIN_TEMPLATE = """
         .sidebar a:hover, .sidebar a.active { background: #e74c3c; color: white; padding-left: 25px; border-left: 4px solid #fff;}
         .img-preview { max-height: 100px; border-radius: 5px; border: 1px solid #ddd; object-fit: contain; width: 100%; background: #e9ecef;}
         .data-attr-box { background: #fff3cd; border-left: 4px solid #ffc107; padding: 10px; margin-bottom: 15px; border-radius: 4px; }
+        .github-badge { background: #333; color: white; padding: 5px 10px; border-radius: 20px; font-size: 12px; margin-bottom: 15px; display: inline-block;}
     </style>
 </head>
 <body>
 <div class="container-fluid">
     <div class="row">
         <div class="col-md-2 sidebar px-0">
-            <h5 class="text-center mb-4 mt-2 font-weight-bold">Site Bölümleri</h5>
+            <h5 class="text-center mb-1 mt-2 font-weight-bold">Site Bölümleri</h5>
+            <div class="text-center mb-3"><span class="github-badge">☁️ GitHub Bağlantılı</span></div>
             <a href="/" class="{% if not active_section %}active{% endif %}">📊 Genel Özet</a>
             {% for sec in sections %}
                 <a href="/edit/{{ sec.id }}" class="{% if active_section == sec.id %}active{% endif %}">
@@ -169,7 +227,6 @@ def dashboard():
             if soup.find(id=sec_id):
                 flash('Bu ID ile bir bölüm zaten var. Farklı bir isim girin.', 'warning')
             else:
-                backup_html()
                 new_sec = soup.new_tag("div", id=sec_id, attrs={"class": "section pt-5 pb-5"})
                 container = soup.new_tag("div", attrs={"class": "container"})
                 row = soup.new_tag("div", attrs={"class": "row"})
@@ -193,17 +250,16 @@ def dashboard():
                     soup.body.append(new_sec)
                     
                 save_soup(soup)
-                flash(f'Yeni boş bölüm (#{sec_id}) başarıyla oluşturuldu!', 'success')
+                flash(f'Yeni boş bölüm (#{sec_id}) başarıyla GitHub reposuna eklendi!', 'success')
             return redirect(url_for('dashboard'))
 
         elif action == 'delete_section_from_dash':
             sec_id_to_delete = request.form.get('sec_id')
             target = soup.find(id=sec_id_to_delete)
             if target:
-                backup_html()
                 target.decompose()
                 save_soup(soup)
-                flash(f'#{sec_id_to_delete} bölümü tamamen silindi!', 'danger')
+                flash(f'#{sec_id_to_delete} bölümü tamamen silindi ve GitHub güncellendi!', 'danger')
             return redirect(url_for('dashboard'))
 
     sections = get_page_sections(soup)
@@ -252,7 +308,6 @@ def dashboard():
         content += '<tr><td colspan="3" class="text-center text-muted py-4">Henüz hiçbir bölüm bulunamadı.</td></tr>'
     else:
         for sec in sections:
-            # --- GİZLİLİK KONTROLÜ ---
             target = soup.find(id=sec['id'])
             is_hidden = False
             if target:
@@ -262,7 +317,6 @@ def dashboard():
                 
             hidden_badge = '<span class="badge badge-warning ml-2 shadow-sm">🙈 Gizli</span>' if is_hidden else ''
             row_style = 'opacity: 0.6;' if is_hidden else ''
-            # -------------------------
 
             content += f"""
                             <tr style="{row_style}">
@@ -347,9 +401,7 @@ def edit_section(section_id):
     if not animated_elements:
         animated_elements = target_section.find_all(class_=re.compile(r'\bcol-'))
 
-    # ================== POST İŞLEMLERİ ==================
     if request.method == 'POST':
-        backup_html()
         action = request.form.get('action', 'save_content')
 
         if action == 'move_up':
@@ -404,6 +456,7 @@ def edit_section(section_id):
             save_soup(soup)
             flash(f'Genel çerçeve korundu, iç veriler temizlenerek kopyalandı! (KOPYA: {new_id})', 'success')
             return redirect(url_for('dashboard'))
+            
         elif action == 'toggle_visibility':
             classes = target_section.get('class', [])
             if isinstance(classes, str):
@@ -425,6 +478,7 @@ def edit_section(section_id):
                 
             save_soup(soup)
             return redirect(url_for('edit_section', section_id=section_id))
+            
         elif action == 'delete_section':
             target_section.decompose() 
             save_soup(soup)
@@ -584,7 +638,7 @@ def edit_section(section_id):
                 ornek_link.insert_after(yeni_link)
 
             save_soup(soup)
-            flash('Linkler kaydedildi!', 'success')
+            flash('Linkler GitHub deposuna kaydedildi!', 'success')
             return redirect(url_for('edit_section', section_id=section_id))
 
         elif action == 'save_effects':
@@ -616,8 +670,6 @@ def edit_section(section_id):
                 if new_val: 
                     data_obj['tag'][data_obj['attr']] = new_val
                 
-                # --- GİZLE/GÖSTER MANTIĞI ---
-                # Etiketin içinde bulunduğu ana sütunu bul (yoksa kendisini al)
                 parent_col = data_obj['tag'].find_parent(class_=re.compile(r'\bcol-'))
                 target_tag = parent_col if parent_col else data_obj['tag']
                 
@@ -638,7 +690,6 @@ def edit_section(section_id):
                     target_tag['class'] = target_classes
                 elif 'class' in target_tag.attrs:
                     del target_tag['class']
-            # ----------------------------
 
             for i, tag in enumerate(texts):
                 new_text = request.form.get(f'text_{i}')
@@ -690,7 +741,7 @@ def edit_section(section_id):
                                 img_data['tag']['style'] = re.sub(r'background.*url\([\'"]?.*?[\'"]?\).*?;?', '', img_data['tag']['style'])
 
             save_soup(soup)
-            flash('İçerikler başarıyla kaydedildi!', 'success')
+            flash('İçerikler başarıyla GitHub deposuna kaydedildi!', 'success')
             return redirect(url_for('edit_section', section_id=section_id))
 
     # ================== HTML OLUŞTURMA & LİSTELEME ==================
@@ -728,14 +779,12 @@ def edit_section(section_id):
         
     video_list_html += "</tbody></table></div></div>"
 
-    # --- HTML OLUŞTURMADAN ÖNCE BÖLÜM GÖRÜNÜRLÜK DURUMUNU KONTROL ET ---
     sec_classes = target_section.get('class', [])
     if isinstance(sec_classes, str): sec_classes = sec_classes.split(' ')
     is_hidden_section = 'd-none' in sec_classes
     
     visibility_btn_class = "btn-success" if is_hidden_section else "btn-secondary"
     visibility_icon = "👁️ Sayfada Göster" if is_hidden_section else "🙈 Bölümü Gizle"
-    # ------------------------------------------------------------------
 
     html_content = f"""
     <div class="d-flex justify-content-between align-items-center mb-4 border-bottom pb-3">
@@ -789,7 +838,6 @@ def edit_section(section_id):
                             <div class="card-body" style="max-height: 600px; overflow-y: auto;">
     """
     
-    # DATA ATTR (YÜZDE/SAYI) GİZLEME-GÖSTERME DÖNGÜSÜ
     if data_attrs:
         for i, data_obj in enumerate(data_attrs):
             parent_col = data_obj['tag'].find_parent(class_=re.compile(r'\bcol-'))
@@ -834,6 +882,7 @@ def edit_section(section_id):
                         <div class="card shadow-sm mb-4">
                             <div class="card-header bg-info text-white font-weight-bold">Görseller</div>
                             <div class="card-body" style="max-height: 500px; overflow-y: auto;">
+                                <div class="alert alert-info py-1 small">Görseller otomatik olarak GitHub'a yüklenecektir.</div>
     """
     
     if not editable_images: 
@@ -846,10 +895,13 @@ def edit_section(section_id):
             elif raw_src == "": 
                 preview_src = "" 
             else:
+                # Local preview için public yolu üzerinden raw github linkine de gidilebilir ama kolaylık olsun diye resmi bozmayalım.
+                # Uygulamayı nerede barındırıyorsanız (örn: render, heroku) ona göre statik yolları ayarlamanız gerekebilir.
                 clean_src = raw_src.replace('../', '').replace('./', '').replace('\\', '/').lstrip('/')
-                preview_src = f"/{clean_src}"
+                # GitHub Raw URL'si ile admin panelinde resimleri göstermek için (opsiyonel)
+                preview_src = f"https://raw.githubusercontent.com/{GITHUB_REPO}/{GITHUB_BRANCH}/public/{clean_src}"
 
-            if preview_src:
+            if preview_src and preview_src != "https://raw.githubusercontent.com/kusenmesut/vers/main/public/":
                 img_tag_html = f'<img src="{preview_src}" class="img-preview mb-2" style="max-height:100px; width:100%; object-fit:contain;" alt="Görsel">'
             else:
                 if item['type'] == 'inject_sec_bg':
@@ -877,7 +929,7 @@ def edit_section(section_id):
     html_content += f"""
                             </div>
                         </div>
-                        <button type="submit" class="btn btn-danger btn-lg btn-block shadow font-weight-bold">💾 Kaydet</button>
+                        <button type="submit" class="btn btn-danger btn-lg btn-block shadow font-weight-bold">💾 Kaydet ve GitHub'a Gönder</button>
                     </div>
                 </div>
             </form>
